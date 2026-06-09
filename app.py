@@ -186,7 +186,7 @@ if page == "📤 Subir sign-ups del día":
 
             st.success(
                 f"✅ {len(assigned)} sign-ups distribuidos{disc_txt} · "
-                f"diff total ≤{report['total_diff']} · diff por categoría ≤{report['max_cat_diff']}"
+                f"diff total ≤{report.get('total_diff', 0)} · diff por categoría ≤{report.get('max_cat_diff', 0)}"
             )
 
             cols = st.columns(len(present_reps))
