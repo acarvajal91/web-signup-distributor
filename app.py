@@ -203,8 +203,15 @@ if page == "📤 Subir sign-ups del día":
                     todays_ids = set(prev_df["vendor_id"].astype(str).unique()) if not prev_df.empty else set()
                     already_dist_ids -= todays_ids
                     sh.delete_date(SPREADSHEET_ID, date_str)
-                    for r in prev_present:
-                        sh.decrement_day(SPREADSHEET_ID, month_str, r)
+                    sh.delete_date(SPREADSHEET_ID, date_str)
+                    # Recalculate days from scratch for all reps
+                    remaining = sh.load_assignments(SPREADSHEET_ID, month_str)
+                    for r in reps:
+                        if not remaining.empty and "date" in remaining.columns:
+                            days = remaining[remaining["assigned_rep"] == r]["date"].nunique()
+                        else:
+                            days = 0
+                        sh.upsert_days_worked(SPREADSHEET_ID, month_str, r, days)
 
                 processed_dates = sh.get_processed_dates(SPREADSHEET_ID, month_str)
                 day_offset = len(processed_dates) % max(len(present_reps), 1)
