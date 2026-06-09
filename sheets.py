@@ -1,14 +1,8 @@
 """
-Google Sheets backend.
-Uses gspread with a Service Account (JSON key stored in Streamlit secrets).
-
-Sheet tabs:
-  assignments  — one row per sign-up assigned
-  days_worked  — running day count per rep/month
-  config       — key/value store for reps list and excluded categories
+Google Sheets backend with automatic retries.
 """
 
-import json
+import time
 from typing import Optional
 
 import gspread
@@ -31,7 +25,6 @@ CONFIG_COLS = ["key", "value"]
 
 @st.cache_resource(ttl=600)
 def get_client() -> gspread.Client:
-    import time
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     for attempt in range(3):
@@ -44,7 +37,6 @@ def get_client() -> gspread.Client:
 
 
 def get_sheet(spreadsheet_id: str, tab_name: str) -> gspread.Worksheet:
-    import time
     for attempt in range(3):
         try:
             gc = get_client()
