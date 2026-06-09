@@ -31,7 +31,7 @@ CONFIG_COLS = ["key", "value"]
 
 @st.cache_resource(ttl=60)
 def get_client() -> gspread.Client:
-    creds_dict = json.loads(st.secrets["gcp_service_account"])
+    creds_dict = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(creds)
 
