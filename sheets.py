@@ -1,5 +1,5 @@
 """
-Google Sheets backend with automatic retries.
+Google Sheets backend with automatic retries and safe empty-DataFrame handling.
 """
 
 import time
@@ -57,10 +57,21 @@ def get_sheet(spreadsheet_id: str, tab_name: str) -> gspread.Worksheet:
             if attempt < 2:
                 st.cache_resource.clear()
                 time.sleep(3)
-    raise Exception(f"No se pudo conectar al Sheet después de 3 intentos.")
+    raise Exception("No se pudo conectar al Sheet después de 3 intentos.")
 
 
-# ── config (reps + excluded categories) ──────────────────────
+def _safe_df(data: list, expected_cols: list) -> pd.DataFrame:
+    """Returns a DataFrame guaranteed to have expected_cols, even if data is empty."""
+    if not data:
+        return pd.DataFrame(columns=expected_cols)
+    df = pd.DataFrame(data)
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = ""
+    return df
+
+
+# ── config ────────────────────────────────────────────────────
 
 def _get_config(spreadsheet_id: str) -> dict[str, str]:
     ws = get_sheet(spreadsheet_id, "config")
@@ -84,9 +95,7 @@ def _set_config(spreadsheet_id: str, key: str, value: str):
 def load_reps(spreadsheet_id: str) -> list[str]:
     cfg = _get_config(spreadsheet_id)
     raw = cfg.get("reps", "")
-    if not raw:
-        return []
-    return [r.strip() for r in raw.split("||") if r.strip()]
+    return [r.strip() for r in raw.split("||") if r.strip()] if raw else []
 
 
 def save_reps(spreadsheet_id: str, reps: list[str]):
@@ -96,9 +105,7 @@ def save_reps(spreadsheet_id: str, reps: list[str]):
 def load_excluded_cats(spreadsheet_id: str) -> list[str]:
     cfg = _get_config(spreadsheet_id)
     raw = cfg.get("excluded_cats", "")
-    if not raw:
-        return []
-    return [c.strip() for c in raw.split("||") if c.strip()]
+    return [c.strip() for c in raw.split("||") if c.strip()] if raw else []
 
 
 def save_excluded_cats(spreadsheet_id: str, cats: list[str]):
@@ -109,9 +116,8 @@ def save_excluded_cats(spreadsheet_id: str, cats: list[str]):
 
 def load_assignments(spreadsheet_id: str, month: Optional[str] = None) -> pd.DataFrame:
     ws = get_sheet(spreadsheet_id, "assignments")
-    data = ws.get_all_records()
-    df = pd.DataFrame(data) if data else pd.DataFrame(columns=ASSIGNMENTS_COLS)
-    if month and not df.empty:
+    df = _safe_df(ws.get_all_records(), ASSIGNMENTS_COLS)
+    if month and not df.empty and "month" in df.columns:
         df = df[df["month"] == month]
     return df
 
@@ -130,7 +136,7 @@ def save_assignments(spreadsheet_id: str, rows: list[dict], date_str: str):
 def delete_date(spreadsheet_id: str, date_str: str):
     ws = get_sheet(spreadsheet_id, "assignments")
     all_vals = ws.get_all_values()
-    if not all_vals:
+    if not all_vals or len(all_vals) < 2:
         return
     try:
         date_col = all_vals[0].index("date")
@@ -148,13 +154,12 @@ def delete_date(spreadsheet_id: str, date_str: str):
 
 def load_days_worked(spreadsheet_id: str, month: str) -> dict[str, int]:
     ws = get_sheet(spreadsheet_id, "days_worked")
-    data = ws.get_all_records()
-    df = pd.DataFrame(data) if data else pd.DataFrame(columns=DAYS_COLS)
-    if df.empty:
-        return {}
-    if "month" not in df.columns:
+    df = _safe_df(ws.get_all_records(), DAYS_COLS)
+    if df.empty or "month" not in df.columns:
         return {}
     month_df = df[df["month"] == month]
+    if month_df.empty:
+        return {}
     return dict(zip(month_df["rep"], month_df["days_worked"].astype(int)))
 
 
@@ -173,7 +178,7 @@ def upsert_days_worked(spreadsheet_id: str, month: str, rep: str, days: int):
         ws.append_row([month, rep, days])
         return
     for i, row in enumerate(all_vals[1:], start=2):
-        if len(row) >= max(month_col, rep_col) and row[month_col - 1] == month and row[rep_col - 1] == rep:
+        if len(row) >= max(month_col, rep_col) and row[month_col-1] == month and row[rep_col-1] == rep:
             ws.update_cell(i, days_col, days)
             return
     ws.append_row([month, rep, days])
@@ -189,13 +194,13 @@ def decrement_day(spreadsheet_id: str, month: str, rep: str):
 
 def get_processed_dates(spreadsheet_id: str, month: str) -> list[str]:
     df = load_assignments(spreadsheet_id, month)
-    if df.empty:
+    if df.empty or "date" not in df.columns:
         return []
     return sorted(df["date"].unique().tolist())
 
 
 def date_already_exists(spreadsheet_id: str, date_str: str) -> bool:
     df = load_assignments(spreadsheet_id)
-    if df.empty:
+    if df.empty or "date" not in df.columns:
         return False
     return date_str in df["date"].values
