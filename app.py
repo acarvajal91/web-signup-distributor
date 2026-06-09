@@ -176,7 +176,7 @@ if page == "📤 Subir sign-ups del día":
                     current_days = sh.load_days_worked(SPREADSHEET_ID, month_str).get(r, 0)
                     sh.upsert_days_worked(SPREADSHEET_ID, month_str, r, current_days + 1)
 
-            report = fairness_report(assigned, present_reps)
+            st.cache_data.clear()
 
             disc_txt = ""
             if n_already_assigned:
