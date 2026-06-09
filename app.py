@@ -12,7 +12,6 @@ import streamlit as st
 import sheets as sh
 from distributor import distribute, fairness_report
 
-# ── page config ───────────────────────────────────────────────
 st.set_page_config(
     page_title="Web Sign-up Distributor",
     page_icon="⚡",
@@ -28,10 +27,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── config from secrets ───────────────────────────────────────
 SPREADSHEET_ID = st.secrets.get("spreadsheet_id", "")
 
-# ── sidebar ───────────────────────────────────────────────────
 with st.sidebar:
     st.title("⚡ Web Sign-up Distributor")
     st.caption("Bodas.net · ES market")
@@ -42,12 +39,11 @@ with st.sidebar:
         "⚙️ Configuración",
     ])
 
-# ── load persistent config from Sheets ───────────────────────
 @st.cache_data(ttl=30)
 def get_reps() -> list[str]:
-    return sh.load_reps(SPREADSHEET_ID) or st.secrets.get("reps", [
+    return sh.load_reps(SPREADSHEET_ID) or list(st.secrets.get("reps", [
         "Rep 1", "Rep 2", "Rep 3", "Rep 4", "Rep 5", "Rep 6", "Rep 7"
-    ])
+    ]))
 
 @st.cache_data(ttl=30)
 def get_excluded_cats() -> list[str]:
@@ -67,8 +63,9 @@ def parse_upload(uploaded_file) -> pd.DataFrame:
         return pd.DataFrame()
     return df
 
-def df_to_mqls(df: pd.DataFrame, excluded_cats: list[str]) -> tuple[list[dict], int]:
-    """Returns (mqls_to_assign, n_excluded)."""
+
+def df_to_mqls(df: pd.DataFrame, excluded_cats: list[str]) -> tuple[list[dict], int, int]:
+    """Returns (mqls_to_assign, n_excluded_cats, n_already_assigned)."""
     all_mqls = [
         {
             "vendor_id": str(row.get("vendor_id", "")),
@@ -77,14 +74,19 @@ def df_to_mqls(df: pd.DataFrame, excluded_cats: list[str]) -> tuple[list[dict], 
             "region": str(row.get("region_name", "")),
             "phone": str(row.get("phone_number", "")),
             "mail": str(row.get("mail", "")),
+            "already_assigned": bool(str(row.get("vendor_salesrep", "")).strip()),
         }
         for _, row in df.iterrows()
         if row.get("vendor_id") and row.get("category_name")
     ]
     excluded_set = set(excluded_cats)
-    keep = [m for m in all_mqls if m["category"] not in excluded_set]
-    discarded = len(all_mqls) - len(keep)
-    return keep, discarded
+    already_assigned = [m for m in all_mqls if m["already_assigned"]]
+    keep = [m for m in all_mqls if not m["already_assigned"] and m["category"] not in excluded_set]
+    n_excluded_cats = len(all_mqls) - len(already_assigned) - len(keep)
+    # Remove internal key before returning
+    for m in keep:
+        m.pop("already_assigned", None)
+    return keep, n_excluded_cats, len(already_assigned)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -113,8 +115,10 @@ if page == "📤 Subir sign-ups del día":
         if uploaded:
             df_raw = parse_upload(uploaded)
             if not df_raw.empty:
-                mqls_preview, n_excl = df_to_mqls(df_raw, excluded_cats)
+                mqls_preview, n_excl, n_assigned = df_to_mqls(df_raw, excluded_cats)
                 msg = f"✓ {len(df_raw)} sign-ups · {df_raw['category_name'].nunique()} categorías"
+                if n_assigned:
+                    msg += f" · **{n_assigned} ya asignados** (descartados)"
                 if n_excl:
                     msg += f" · **{n_excl} descartados** (categorías excluidas)"
                 st.success(msg)
@@ -124,7 +128,13 @@ if page == "📤 Subir sign-ups del día":
                     preview = df_raw[["vendor_id", "vendor_name", "category_name"]].copy()
                     if "region_name" in df_raw.columns:
                         preview["region_name"] = df_raw["region_name"]
-                    preview["excluido"] = preview["category_name"].isin(excluded_cats)
+                    if "vendor_salesrep" in df_raw.columns:
+                        preview["ya_asignado"] = df_raw["vendor_salesrep"].apply(
+                            lambda x: "✓" if str(x).strip() else ""
+                        )
+                    preview["excluido"] = preview["category_name"].isin(excluded_cats).apply(
+                        lambda x: "✓" if x else ""
+                    )
                     st.dataframe(preview.head(30), use_container_width=True, hide_index=True)
 
     st.divider()
@@ -151,7 +161,7 @@ if page == "📤 Subir sign-ups del día":
                 processed_dates = sh.get_processed_dates(SPREADSHEET_ID, month_str)
                 day_offset = len(processed_dates) % len(present_reps)
 
-                mqls, n_discarded = df_to_mqls(df_raw, excluded_cats)
+                mqls, n_discarded_cats, n_already_assigned = df_to_mqls(df_raw, excluded_cats)
                 assigned = distribute(mqls, present_reps, day_offset)
 
                 sh.save_assignments(SPREADSHEET_ID, assigned, date_str)
@@ -161,7 +171,12 @@ if page == "📤 Subir sign-ups del día":
 
             report = fairness_report(assigned, present_reps)
 
-            disc_txt = f" · {n_discarded} descartados" if n_discarded else ""
+            disc_txt = ""
+            if n_already_assigned:
+                disc_txt += f" · {n_already_assigned} ya asignados descartados"
+            if n_discarded_cats:
+                disc_txt += f" · {n_discarded_cats} excluidos por categoría"
+
             st.success(
                 f"✅ {len(assigned)} sign-ups distribuidos{disc_txt} · "
                 f"diff total ≤{report['total_diff']} · diff por categoría ≤{report['max_cat_diff']}"
@@ -222,13 +237,15 @@ elif page == "📊 Historial del mes":
         else:
             all_reps = sorted(df_month["assigned_rep"].unique().tolist())
             all_dates = sorted(df_month["date"].unique().tolist())
-            cats = sorted(df_month["category"].unique().tolist())
+            all_cats = sorted(df_month["category"].unique().tolist())
 
+            # ── Summary metrics ───────────────────────────────
             c1, c2, c3 = st.columns(3)
             c1.metric("Sign-ups asignados", len(df_month))
             c2.metric("Días procesados", len(all_dates))
-            c3.metric("Categorías", len(cats))
+            c3.metric("Categorías", len(all_cats))
 
+            # ── Rep summary table ─────────────────────────────
             st.markdown("**Resumen por rep**")
             summary_rows = []
             for r in all_reps:
@@ -243,6 +260,32 @@ elif page == "📊 Historial del mes":
                 })
             st.dataframe(pd.DataFrame(summary_rows).set_index("Rep"), use_container_width=True)
 
+            # ── Rep × Category matrix ─────────────────────────
+            st.markdown("**Sign-ups por rep y categoría**")
+            matrix_rows = []
+            for r in all_reps:
+                rep_df = df_month[df_month["assigned_rep"] == r]
+                days = days_worked.get(r, 0)
+                row = {
+                    "Rep": r,
+                    "Días": days,
+                    "Total": len(rep_df),
+                    "x/día": round(len(rep_df) / days, 1) if days else "-",
+                }
+                for c in all_cats:
+                    row[c] = len(rep_df[rep_df["category"] == c])
+                matrix_rows.append(row)
+
+            # Totals row
+            totals_row = {"Rep": "TOTAL", "Días": "-", "Total": len(df_month), "x/día": "-"}
+            for c in all_cats:
+                totals_row[c] = len(df_month[df_month["category"] == c])
+            matrix_rows.append(totals_row)
+
+            matrix_df = pd.DataFrame(matrix_rows).set_index("Rep")
+            st.dataframe(matrix_df, use_container_width=True)
+
+            # ── Day-by-day breakdown ──────────────────────────
             st.markdown("**Detalle por día**")
             for d in reversed(all_dates):
                 day_df = df_month[df_month["date"] == d]
@@ -258,6 +301,7 @@ elif page == "📊 Historial del mes":
                         hide_index=True,
                     )
 
+            # ── Download ──────────────────────────────────────
             csv = df_month.to_csv(index=False).encode("utf-8")
             st.download_button(
                 f"⬇️ Descargar CSV mes {selected_month}",
