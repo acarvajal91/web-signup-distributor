@@ -27,13 +27,7 @@ CONFIG_COLS = ["key", "value"]
 def get_client() -> gspread.Client:
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    for attempt in range(3):
-        try:
-            return gspread.authorize(creds)
-        except Exception:
-            if attempt < 2:
-                time.sleep(2)
-    return gspread.authorize(creds)
+    return gspread.Client(auth=creds)
 
 
 def get_sheet(spreadsheet_id: str, tab_name: str) -> gspread.Worksheet:
