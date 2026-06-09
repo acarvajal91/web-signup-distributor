@@ -152,6 +152,8 @@ def load_days_worked(spreadsheet_id: str, month: str) -> dict[str, int]:
     df = pd.DataFrame(data) if data else pd.DataFrame(columns=DAYS_COLS)
     if df.empty:
         return {}
+    if "month" not in df.columns:
+        return {}
     month_df = df[df["month"] == month]
     return dict(zip(month_df["rep"], month_df["days_worked"].astype(int)))
 
