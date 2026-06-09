@@ -29,28 +29,43 @@ DAYS_COLS = ["month", "rep", "days_worked"]
 CONFIG_COLS = ["key", "value"]
 
 
-@st.cache_resource(ttl=60)
+@st.cache_resource(ttl=600)
 def get_client() -> gspread.Client:
+    import time
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    for attempt in range(3):
+        try:
+            return gspread.authorize(creds)
+        except Exception:
+            if attempt < 2:
+                time.sleep(2)
     return gspread.authorize(creds)
 
 
 def get_sheet(spreadsheet_id: str, tab_name: str) -> gspread.Worksheet:
-    gc = get_client()
-    sh = gc.open_by_key(spreadsheet_id)
-    try:
-        return sh.worksheet(tab_name)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=tab_name, rows=1000, cols=20)
-        headers = {
-            "assignments": ASSIGNMENTS_COLS,
-            "days_worked": DAYS_COLS,
-            "config": CONFIG_COLS,
-        }
-        if tab_name in headers:
-            ws.append_row(headers[tab_name])
-        return ws
+    import time
+    for attempt in range(3):
+        try:
+            gc = get_client()
+            sh = gc.open_by_key(spreadsheet_id)
+            try:
+                return sh.worksheet(tab_name)
+            except gspread.WorksheetNotFound:
+                ws = sh.add_worksheet(title=tab_name, rows=1000, cols=20)
+                headers = {
+                    "assignments": ASSIGNMENTS_COLS,
+                    "days_worked": DAYS_COLS,
+                    "config": CONFIG_COLS,
+                }
+                if tab_name in headers:
+                    ws.append_row(headers[tab_name])
+                return ws
+        except gspread.exceptions.APIError:
+            if attempt < 2:
+                st.cache_resource.clear()
+                time.sleep(3)
+    raise Exception(f"No se pudo conectar al Sheet después de 3 intentos.")
 
 
 # ── config (reps + excluded categories) ──────────────────────
