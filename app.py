@@ -67,13 +67,6 @@ def df_to_mqls(
     excluded_cats: list[str],
     already_distributed_ids: set[str],
 ) -> tuple[list[dict], int, int, int]:
-    """
-    Returns (mqls_to_assign, n_excluded_cats, n_already_assigned, n_already_distributed).
-    Filters out:
-      - rows where vendor_salesrep is already filled
-      - rows whose category is in excluded_cats
-      - rows whose vendor_id was already distributed this month
-    """
     all_mqls = []
     for _, row in df.iterrows():
         if not row.get("vendor_id") or not row.get("category_name"):
@@ -89,7 +82,6 @@ def df_to_mqls(
             "mail": str(row.get("mail", "")),
             "already_assigned": already,
         })
-
     excluded_set = set(excluded_cats)
     already_assigned = [m for m in all_mqls if m["already_assigned"]]
     not_assigned = [m for m in all_mqls if not m["already_assigned"]]
@@ -100,10 +92,8 @@ def df_to_mqls(
         and m["category"] not in excluded_set
     ]
     n_excluded_cats = len(not_assigned) - len(already_distributed) - len(keep)
-
     for m in keep:
         m.pop("already_assigned", None)
-
     return keep, n_excluded_cats, len(already_assigned), len(already_distributed)
 
 
@@ -133,7 +123,6 @@ if page == "📤 Subir sign-ups del día":
         if uploaded:
             df_raw = parse_upload(uploaded)
             if not df_raw.empty:
-                # Load already distributed IDs for this month
                 month_str_preview = today.strftime("%Y-%m")
                 existing_preview = sh.load_assignments(SPREADSHEET_ID, month_str_preview)
                 already_dist_ids = (
@@ -141,7 +130,6 @@ if page == "📤 Subir sign-ups del día":
                     if not existing_preview.empty and "vendor_id" in existing_preview.columns
                     else set()
                 )
-
                 mqls_preview, n_excl, n_assigned, n_dist = df_to_mqls(
                     df_raw, excluded_cats, already_dist_ids
                 )
@@ -153,10 +141,8 @@ if page == "📤 Subir sign-ups del día":
                 if n_excl:
                     msg += f" · **{n_excl} categoría excluida** (descartados)"
                 st.success(msg)
-
                 if excluded_cats:
                     st.caption(f"Categorías excluidas: {', '.join(excluded_cats)}")
-
                 with st.expander("Vista previa", expanded=False):
                     preview = df_raw[["vendor_id", "vendor_name", "category_name"]].copy()
                     if "region_name" in df_raw.columns:
@@ -185,7 +171,6 @@ if page == "📤 Subir sign-ups del día":
             month_str = today.strftime("%Y-%m")
 
             with st.spinner("Distribuyendo..."):
-                # Load already distributed IDs for deduplication
                 existing_month = sh.load_assignments(SPREADSHEET_ID, month_str)
                 already_dist_ids = (
                     set(existing_month["vendor_id"].astype(str).unique())
@@ -193,25 +178,17 @@ if page == "📤 Subir sign-ups del día":
                     else set()
                 )
 
-                # If overwriting today, remove today's IDs from the exclusion set
                 already_exists = sh.date_already_exists(SPREADSHEET_ID, date_str)
                 if already_exists:
                     st.warning(f"Ya hay sign-ups para {date_str}. Se sobrescribirán.")
-                    prev_df = existing_month[existing_month["date"] == date_str] if not existing_month.empty and "date" in existing_month.columns else pd.DataFrame()
-                    prev_present = prev_df["assigned_rep"].unique().tolist() if not prev_df.empty else []
-                    # Remove today's vendor_ids from exclusion so they can be reassigned
-                    todays_ids = set(prev_df["vendor_id"].astype(str).unique()) if not prev_df.empty else set()
-                    already_dist_ids -= todays_ids
+                    if not existing_month.empty and "date" in existing_month.columns:
+                        todays_ids = set(
+                            existing_month[existing_month["date"] == date_str]["vendor_id"].astype(str).unique()
+                        )
+                        already_dist_ids -= todays_ids
                     sh.delete_date(SPREADSHEET_ID, date_str)
-                    sh.delete_date(SPREADSHEET_ID, date_str)
-                    # Recalculate days from scratch for all reps
-                    remaining = sh.load_assignments(SPREADSHEET_ID, month_str)
-                    for r in reps:
-                        if not remaining.empty and "date" in remaining.columns:
-                            days = remaining[remaining["assigned_rep"] == r]["date"].nunique()
-                        else:
-                            days = 0
-                        sh.upsert_days_worked(SPREADSHEET_ID, month_str, r, days)
+                    # Recalculate days from remaining history
+                    sh.recalc_days_from_history(SPREADSHEET_ID, month_str, reps)
 
                 processed_dates = sh.get_processed_dates(SPREADSHEET_ID, month_str)
                 day_offset = len(processed_dates) % max(len(present_reps), 1)
@@ -226,11 +203,12 @@ if page == "📤 Subir sign-ups del día":
 
                 assigned = distribute(mqls, present_reps, day_offset)
                 sh.save_assignments(SPREADSHEET_ID, assigned, date_str)
+
+                # Add today's day to present reps
                 for r in present_reps:
                     current_days = sh.load_days_worked(SPREADSHEET_ID, month_str).get(r, 0)
                     sh.upsert_days_worked(SPREADSHEET_ID, month_str, r, current_days + 1)
 
-                # Clear cache so history updates immediately
                 st.cache_data.clear()
 
             report = fairness_report(assigned, present_reps)
@@ -323,8 +301,7 @@ elif page == "📊 Historial del mes":
                         "Rep": r,
                         "Días trabajados": days,
                         "Sign-ups totales": len(rep_df),
-                        "Sign-ups/día": round(len(rep_df) / days, 1) if days else "-",
-                        "Categorías": len(rep_df["category"].unique()),
+                        "Sign-ups/día": round(len(rep_df) / days, 1) if days else 0,
                     })
                 st.dataframe(pd.DataFrame(summary_rows).set_index("Rep"), use_container_width=True)
 
@@ -337,13 +314,13 @@ elif page == "📊 Historial del mes":
                         "Rep": r,
                         "Días": days,
                         "Total": len(rep_df),
-                        "x/día": round(len(rep_df) / days, 1) if days else "-",
+                        "x/día": round(len(rep_df) / days, 1) if days else 0,
                     }
                     for c in all_cats:
                         row[c] = len(rep_df[rep_df["category"] == c])
                     matrix_rows.append(row)
 
-                totals_row = {"Rep": "TOTAL", "Días": "-", "Total": len(df_month), "x/día": "-"}
+                totals_row = {"Rep": "TOTAL", "Días": 0, "Total": len(df_month), "x/día": 0}
                 for c in all_cats:
                     totals_row[c] = len(df_month[df_month["category"] == c])
                 matrix_rows.append(totals_row)
