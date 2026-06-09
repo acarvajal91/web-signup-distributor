@@ -47,10 +47,10 @@ def get_sheet(spreadsheet_id: str, tab_name: str) -> gspread.Worksheet:
                 if tab_name in headers:
                     ws.append_row(headers[tab_name])
                 return ws
-        except gspread.exceptions.APIError:
+        except Exception:
             if attempt < 2:
                 st.cache_resource.clear()
-                time.sleep(3)
+                time.sleep(2)
     raise Exception("No se pudo conectar al Sheet después de 3 intentos.")
 
 
