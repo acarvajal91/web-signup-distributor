@@ -74,7 +74,7 @@ def df_to_mqls(df: pd.DataFrame, excluded_cats: list[str]) -> tuple[list[dict], 
             "region": str(row.get("region_name", "")),
             "phone": str(row.get("phone_number", "")),
             "mail": str(row.get("mail", "")),
-            "already_assigned": bool(str(row.get("vendor_salesrep", "")).strip()),
+            "already_assigned": bool(pd.notna(row.get("vendor_salesrep")) and str(row.get("vendor_salesrep", "")).strip()),
         }
         for _, row in df.iterrows()
         if row.get("vendor_id") and row.get("category_name")
