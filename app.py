@@ -1,7 +1,5 @@
 """
 Web Sign-up Distributor — Streamlit App
-Run locally:  streamlit run app.py
-Deploy:       Streamlit Cloud (see README.md)
 """
 
 from datetime import date
@@ -49,7 +47,7 @@ def get_reps() -> list[str]:
 def get_excluded_cats() -> list[str]:
     return sh.load_excluded_cats(SPREADSHEET_ID)
 
-# ── helpers ───────────────────────────────────────────────────
+
 def parse_upload(uploaded_file) -> pd.DataFrame:
     if uploaded_file.name.endswith(".csv"):
         df = pd.read_csv(uploaded_file)
@@ -66,27 +64,28 @@ def parse_upload(uploaded_file) -> pd.DataFrame:
 
 def df_to_mqls(df: pd.DataFrame, excluded_cats: list[str]) -> tuple[list[dict], int, int]:
     """Returns (mqls_to_assign, n_excluded_cats, n_already_assigned)."""
-    all_mqls = [
-        {
+    all_mqls = []
+    for _, row in df.iterrows():
+        if not row.get("vendor_id") or not row.get("category_name"):
+            continue
+        salesrep = row.get("vendor_salesrep")
+        already = bool(pd.notna(salesrep) and str(salesrep).strip())
+        all_mqls.append({
             "vendor_id": str(row.get("vendor_id", "")),
             "vendor_name": str(row.get("vendor_name", "")),
             "category": str(row.get("category_name", "")),
             "region": str(row.get("region_name", "")),
             "phone": str(row.get("phone_number", "")),
             "mail": str(row.get("mail", "")),
-            "already_assigned": bool(pd.notna(row.get("vendor_salesrep")) and str(row.get("vendor_salesrep", "")).strip()),
-        }
-        for _, row in df.iterrows()
-        if row.get("vendor_id") and row.get("category_name")
-    ]
+            "already_assigned": already,
+        })
     excluded_set = set(excluded_cats)
-    already_assigned = [m for m in all_mqls if m["already_assigned"]]
+    already_list = [m for m in all_mqls if m["already_assigned"]]
     keep = [m for m in all_mqls if not m["already_assigned"] and m["category"] not in excluded_set]
-    n_excluded_cats = len(all_mqls) - len(already_assigned) - len(keep)
-    # Remove internal key before returning
+    n_excluded_cats = len(all_mqls) - len(already_list) - len(keep)
     for m in keep:
         m.pop("already_assigned", None)
-    return keep, n_excluded_cats, len(already_assigned)
+    return keep, n_excluded_cats, len(already_list)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -130,7 +129,7 @@ if page == "📤 Subir sign-ups del día":
                         preview["region_name"] = df_raw["region_name"]
                     if "vendor_salesrep" in df_raw.columns:
                         preview["ya_asignado"] = df_raw["vendor_salesrep"].apply(
-                            lambda x: "✓" if str(x).strip() else ""
+                            lambda x: "✓" if pd.notna(x) and str(x).strip() else ""
                         )
                     preview["excluido"] = preview["category_name"].isin(excluded_cats).apply(
                         lambda x: "✓" if x else ""
@@ -152,18 +151,26 @@ if page == "📤 Subir sign-ups del día":
                 already_exists = sh.date_already_exists(SPREADSHEET_ID, date_str)
                 if already_exists:
                     st.warning(f"Ya hay sign-ups para {date_str}. Se sobrescribirán.")
-                    prev_assigned = sh.load_assignments(SPREADSHEET_ID).query(f"date == '{date_str}'")
-                    prev_present = prev_assigned["assigned_rep"].unique().tolist() if not prev_assigned.empty else []
+                    prev_assigned = sh.load_assignments(SPREADSHEET_ID)
+                    if not prev_assigned.empty and "date" in prev_assigned.columns:
+                        prev_assigned = prev_assigned[prev_assigned["date"] == date_str]
+                        prev_present = prev_assigned["assigned_rep"].unique().tolist()
+                    else:
+                        prev_present = []
                     sh.delete_date(SPREADSHEET_ID, date_str)
                     for r in prev_present:
                         sh.decrement_day(SPREADSHEET_ID, month_str, r)
 
                 processed_dates = sh.get_processed_dates(SPREADSHEET_ID, month_str)
-                day_offset = len(processed_dates) % len(present_reps)
+                day_offset = len(processed_dates) % max(len(present_reps), 1)
 
                 mqls, n_discarded_cats, n_already_assigned = df_to_mqls(df_raw, excluded_cats)
-                assigned = distribute(mqls, present_reps, day_offset)
 
+                if not mqls:
+                    st.error("No quedan sign-ups para distribuir después de aplicar los filtros.")
+                    st.stop()
+
+                assigned = distribute(mqls, present_reps, day_offset)
                 sh.save_assignments(SPREADSHEET_ID, assigned, date_str)
                 for r in present_reps:
                     current_days = sh.load_days_worked(SPREADSHEET_ID, month_str).get(r, 0)
@@ -220,95 +227,91 @@ elif page == "📊 Historial del mes":
     st.header("Historial del mes")
 
     all_df = sh.load_assignments(SPREADSHEET_ID)
-    available_months = sorted(
-        {m for m in all_df["month"].unique() if m} if not all_df.empty else [],
-        reverse=True,
-    )
 
-    if not available_months:
+    if all_df.empty or "month" not in all_df.columns:
         st.info("Aún no hay datos guardados.")
     else:
-        selected_month = st.selectbox("Mes", available_months)
-        df_month = sh.load_assignments(SPREADSHEET_ID, selected_month)
-        days_worked = sh.load_days_worked(SPREADSHEET_ID, selected_month)
-
-        if df_month.empty:
-            st.info("Sin datos para este mes.")
+        available_months = sorted(
+            {m for m in all_df["month"].unique() if m},
+            reverse=True,
+        )
+        if not available_months:
+            st.info("Aún no hay datos guardados.")
         else:
-            all_reps = sorted(df_month["assigned_rep"].unique().tolist())
-            all_dates = sorted(df_month["date"].unique().tolist())
-            all_cats = sorted(df_month["category"].unique().tolist())
+            selected_month = st.selectbox("Mes", available_months)
+            df_month = sh.load_assignments(SPREADSHEET_ID, selected_month)
+            days_worked = sh.load_days_worked(SPREADSHEET_ID, selected_month)
 
-            # ── Summary metrics ───────────────────────────────
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Sign-ups asignados", len(df_month))
-            c2.metric("Días procesados", len(all_dates))
-            c3.metric("Categorías", len(all_cats))
+            if df_month.empty:
+                st.info("Sin datos para este mes.")
+            else:
+                all_reps = sorted(df_month["assigned_rep"].unique().tolist())
+                all_dates = sorted(df_month["date"].unique().tolist())
+                all_cats = sorted(df_month["category"].unique().tolist())
 
-            # ── Rep summary table ─────────────────────────────
-            st.markdown("**Resumen por rep**")
-            summary_rows = []
-            for r in all_reps:
-                rep_df = df_month[df_month["assigned_rep"] == r]
-                days = days_worked.get(r, 0)
-                summary_rows.append({
-                    "Rep": r,
-                    "Días trabajados": days,
-                    "Sign-ups totales": len(rep_df),
-                    "Sign-ups/día": round(len(rep_df) / days, 1) if days else "-",
-                    "Categorías": len(rep_df["category"].unique()),
-                })
-            st.dataframe(pd.DataFrame(summary_rows).set_index("Rep"), use_container_width=True)
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Sign-ups asignados", len(df_month))
+                c2.metric("Días procesados", len(all_dates))
+                c3.metric("Categorías", len(all_cats))
 
-            # ── Rep × Category matrix ─────────────────────────
-            st.markdown("**Sign-ups por rep y categoría**")
-            matrix_rows = []
-            for r in all_reps:
-                rep_df = df_month[df_month["assigned_rep"] == r]
-                days = days_worked.get(r, 0)
-                row = {
-                    "Rep": r,
-                    "Días": days,
-                    "Total": len(rep_df),
-                    "x/día": round(len(rep_df) / days, 1) if days else "-",
-                }
+                st.markdown("**Resumen por rep**")
+                summary_rows = []
+                for r in all_reps:
+                    rep_df = df_month[df_month["assigned_rep"] == r]
+                    days = days_worked.get(r, 0)
+                    summary_rows.append({
+                        "Rep": r,
+                        "Días trabajados": days,
+                        "Sign-ups totales": len(rep_df),
+                        "Sign-ups/día": round(len(rep_df) / days, 1) if days else "-",
+                        "Categorías": len(rep_df["category"].unique()),
+                    })
+                st.dataframe(pd.DataFrame(summary_rows).set_index("Rep"), use_container_width=True)
+
+                st.markdown("**Sign-ups por rep y categoría**")
+                matrix_rows = []
+                for r in all_reps:
+                    rep_df = df_month[df_month["assigned_rep"] == r]
+                    days = days_worked.get(r, 0)
+                    row = {
+                        "Rep": r,
+                        "Días": days,
+                        "Total": len(rep_df),
+                        "x/día": round(len(rep_df) / days, 1) if days else "-",
+                    }
+                    for c in all_cats:
+                        row[c] = len(rep_df[rep_df["category"] == c])
+                    matrix_rows.append(row)
+
+                totals_row = {"Rep": "TOTAL", "Días": "-", "Total": len(df_month), "x/día": "-"}
                 for c in all_cats:
-                    row[c] = len(rep_df[rep_df["category"] == c])
-                matrix_rows.append(row)
+                    totals_row[c] = len(df_month[df_month["category"] == c])
+                matrix_rows.append(totals_row)
 
-            # Totals row
-            totals_row = {"Rep": "TOTAL", "Días": "-", "Total": len(df_month), "x/día": "-"}
-            for c in all_cats:
-                totals_row[c] = len(df_month[df_month["category"] == c])
-            matrix_rows.append(totals_row)
+                st.dataframe(pd.DataFrame(matrix_rows).set_index("Rep"), use_container_width=True)
 
-            matrix_df = pd.DataFrame(matrix_rows).set_index("Rep")
-            st.dataframe(matrix_df, use_container_width=True)
+                st.markdown("**Detalle por día**")
+                for d in reversed(all_dates):
+                    day_df = df_month[df_month["date"] == d]
+                    by_rep = day_df.groupby("assigned_rep").size().to_dict()
+                    summary = " · ".join(f"{r}: {n}" for r, n in sorted(by_rep.items()))
+                    with st.expander(f"{d} — {len(day_df)} sign-ups  ({summary})"):
+                        st.dataframe(
+                            day_df[["assigned_rep", "vendor_name", "category", "region"]].rename(
+                                columns={"assigned_rep": "Rep", "vendor_name": "Vendor",
+                                         "category": "Categoría", "region": "Región"}
+                            ).sort_values(["Rep", "Categoría"]),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
 
-            # ── Day-by-day breakdown ──────────────────────────
-            st.markdown("**Detalle por día**")
-            for d in reversed(all_dates):
-                day_df = df_month[df_month["date"] == d]
-                by_rep = day_df.groupby("assigned_rep").size().to_dict()
-                summary = " · ".join(f"{r}: {n}" for r, n in sorted(by_rep.items()))
-                with st.expander(f"{d} — {len(day_df)} sign-ups  ({summary})"):
-                    st.dataframe(
-                        day_df[["assigned_rep", "vendor_name", "category", "region"]].rename(
-                            columns={"assigned_rep": "Rep", "vendor_name": "Vendor",
-                                     "category": "Categoría", "region": "Región"}
-                        ).sort_values(["Rep", "Categoría"]),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-            # ── Download ──────────────────────────────────────
-            csv = df_month.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                f"⬇️ Descargar CSV mes {selected_month}",
-                data=csv,
-                file_name=f"signups_{selected_month}.csv",
-                mime="text/csv",
-            )
+                csv = df_month.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    f"⬇️ Descargar CSV mes {selected_month}",
+                    data=csv,
+                    file_name=f"signups_{selected_month}.csv",
+                    mime="text/csv",
+                )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -320,7 +323,6 @@ elif page == "⚙️ Configuración":
     reps = get_reps()
     excluded_cats = get_excluded_cats()
 
-    # ── Reps ─────────────────────────────────────────────────
     st.subheader("Equipo de sales")
     st.caption("Los cambios aplican desde el siguiente día distribuido.")
 
@@ -350,7 +352,6 @@ elif page == "⚙️ Configuración":
                 st.success(f"Rep '{new_rep.strip()}' añadido.")
                 st.rerun()
 
-    # ── Categorías excluidas ──────────────────────────────────
     st.subheader("Categorías excluidas")
     st.caption("Los sign-ups de estas categorías se descartan y no se asignan a ningún rep.")
 
@@ -379,6 +380,5 @@ elif page == "⚙️ Configuración":
                 st.success(f"Categoría '{new_cat.strip()}' excluida.")
                 st.rerun()
 
-    # ── Sheet info ────────────────────────────────────────────
     st.subheader("Google Sheet")
     st.code(f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}")
