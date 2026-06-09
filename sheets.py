@@ -1,5 +1,5 @@
 """
-Google Sheets backend with automatic retries and safe empty-DataFrame handling.
+Google Sheets backend — stable auth with token refresh.
 """
 
 import time
@@ -23,11 +23,19 @@ DAYS_COLS = ["month", "rep", "days_worked"]
 CONFIG_COLS = ["key", "value"]
 
 
-@st.cache_resource(ttl=600)
-def get_client() -> gspread.Client:
+def _make_client() -> gspread.Client:
+    """Create a fresh authenticated gspread client with token refresh."""
+    import google.auth.transport.requests
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    request = google.auth.transport.requests.Request()
+    creds.refresh(request)
     return gspread.Client(auth=creds)
+
+
+@st.cache_resource(ttl=300)
+def get_client() -> gspread.Client:
+    return _make_client()
 
 
 def get_sheet(spreadsheet_id: str, tab_name: str) -> gspread.Worksheet:
@@ -47,15 +55,15 @@ def get_sheet(spreadsheet_id: str, tab_name: str) -> gspread.Worksheet:
                 if tab_name in headers:
                     ws.append_row(headers[tab_name])
                 return ws
-        except Exception:
+        except Exception as e:
             if attempt < 2:
                 st.cache_resource.clear()
-                time.sleep(2)
-    raise Exception("No se pudo conectar al Sheet después de 3 intentos.")
+                time.sleep(3)
+            else:
+                raise Exception(f"No se pudo conectar al Sheet: {e}")
 
 
 def _safe_df(data: list, expected_cols: list) -> pd.DataFrame:
-    """Returns a DataFrame guaranteed to have expected_cols, even if data is empty."""
     if not data:
         return pd.DataFrame(columns=expected_cols)
     df = pd.DataFrame(data)
@@ -178,10 +186,15 @@ def upsert_days_worked(spreadsheet_id: str, month: str, rep: str, days: int):
     ws.append_row([month, rep, days])
 
 
-def decrement_day(spreadsheet_id: str, month: str, rep: str):
-    current = load_days_worked(spreadsheet_id, month).get(rep, 0)
-    if current > 0:
-        upsert_days_worked(spreadsheet_id, month, rep, current - 1)
+def recalc_days_from_history(spreadsheet_id: str, month: str, all_reps: list[str]):
+    """Recount days worked per rep from assignment history. Safe to call after overwrite."""
+    df = load_assignments(spreadsheet_id, month)
+    for r in all_reps:
+        if not df.empty and "date" in df.columns and "assigned_rep" in df.columns:
+            days = int(df[df["assigned_rep"] == r]["date"].nunique())
+        else:
+            days = 0
+        upsert_days_worked(spreadsheet_id, month, r, days)
 
 
 # ── helpers ───────────────────────────────────────────────────
